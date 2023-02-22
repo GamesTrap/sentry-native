@@ -25,4 +25,7 @@ Makefile
 bin/**
 bin-int/**
 **.make
-Makefile
+**.vcxproj
+**.sln
+**.vcxproj.filters
+**.vcxproj.user

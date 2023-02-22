@@ -74,8 +74,6 @@ project "SentryNative"
 		"CRASHPAD_ZLIB_SOURCE_EMBEDDED",
 		"SENTRY_BACKEND_CRASHPAD",
 		"SENTRY_BUILD_SHARED",
-		"SENTRY_WITH_UNWINDER_LIBBACKTRACE",
-		"SIZEOF_LONG=8",
 		"ZLIB_CONST",
 	}
 
@@ -110,8 +108,10 @@ project "SentryNative"
 		"src/symbolizer/sentry_symbolizer_windows.c",
 		"src/transports/sentry_transport_none.c",
 		"src/transports/sentry_transport_winhttp.c",
+		"src/transports/sentry_transport_curl.c",
 		"src/unwinder/sentry_unwinder_dbghelp.c",
 		"src/unwinder/sentry_unwinder_libunwindstack.cpp",
+		"src/unwinder/sentry_unwinder_libbacktrace.c",
 		"src/sentry_unix_pageallocator.c",
 		"src/sentry_unix_pageallocator.h",
 		"src/sentry_unix_spinlock.h",
@@ -142,7 +142,7 @@ project "SentryNative"
 
 		-- "CrashpadSnapshot",
 		-- "CrashpadMinidump",
-		-- "CrashpadHandler",
+		-- "CrashpadHandlerLib",
 		-- "CrashpadTools",
 	}
 
@@ -156,6 +156,8 @@ project "SentryNative"
 			"src/sentry_unix_pageallocator.c",
 			"src/sentry_unix_pageallocator.h",
 			"src/sentry_unix_spinlock.h",
+			"src/transports/sentry_transport_curl.c",
+			"src/unwinder/sentry_unwinder_libbacktrace.c",
 		}
 
 		includedirs
@@ -175,17 +177,67 @@ project "SentryNative"
 			"rt",
 		}
 
+		defines
+		{
+			"SENTRY_WITH_UNWINDER_LIBBACKTRACE",
+			"SIZEOF_LONG=8",
+		}
+
 	filter "system:windows"
 		files
 		{
 			"src/modulefinder/sentry_modulefinder_windows.h",
+			"src/modulefinder/sentry_modulefinder_windows.c",
 			"src/path/sentry_path_windows.c",
 			"src/symbolizer/sentry_symbolizer_windows.c",
+			"src/transports/sentry_transport_winhttp.c",
+			"src/sentry_windows_dbghelp.h",
+			"src/sentry_windows_dbghelp.c",
+			"src/unwinder/sentry_unwinder_dbghelp.c",
 		}
 
 		includedirs
 		{
 			"external/crashpad/compat/win",
+		}
+
+		defines
+		{
+			"SENTRY_WITH_UNWINDER_DBGHELP",
+			"SIZEOF_LONG=4",
+			"_WIN32_WINNT=0x0A00",
+			"CRASHPAD_WER_ENABLED",
+			"sentry_EXPORTS",
+
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
+		}
+
+		links
+		{
+			"CrashpadGetOpt",
+
+			"dbghelp.lib",
+			"shlwapi.lib",
+			"version.lib",
+			"winhttp.lib",
+			"user32.lib",
+			"advapi32.lib",
+			"kernel32.lib",
+			"rpcrt4.lib",
+			"gdi32.lib",
+			"winspool.lib",
+			"shell32.lib",
+			"ole32.lib",
+			"oleaut32.lib",
+			"uuid.lib",
+			"comdlg32.lib",
 		}
 
     filter "configurations:Debug"
@@ -196,7 +248,7 @@ project "SentryNative"
 		runtime "Release"
         optimize "Full"
 
-project "CrashpadHandlerExecutable"
+project "crashpad_handler"
     kind "ConsoleApp"
     language "C++"
     cppdialect "C++17"
@@ -235,7 +287,7 @@ project "CrashpadHandlerExecutable"
 	{
 		--NOTE Do not change or linking will fail
 		"CrashpadClient",
-		"CrashpadHandler",
+		"CrashpadHandlerLib",
 		"CrashpadMinidump",
 		"CrashpadSnapshot",
 		"CrashpadTools",
@@ -274,6 +326,38 @@ project "CrashpadHandlerExecutable"
 		includedirs
 		{
 			"external/crashpad/compat/win",
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
+		}
+
+		links
+		{
+			"CrashpadGetOpt",
+
+			"rpcrt4.lib",
+			"powrprof.lib",
+			"user32.lib",
+			"version.lib",
+			"winhttp.lib",
+			"advapi32.lib",
+			"kernel32.lib",
+			"gdi32.lib",
+			"winspool.lib",
+			"shell32.lib",
+			"ole32.lib",
+			"oleaut32.lib",
+			"uuid.lib",
+			"comdlg32.lib",
 		}
 
     filter "configurations:Debug"
@@ -327,6 +411,19 @@ project "CrashpadZLib"
 		"external/crashpad",
 		"external/crashpad/third_party/mini_chromium/mini_chromium",
     }
+
+	filter "system:windows"
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
+		}
 
     filter "configurations:Debug"
 	    runtime "Debug"
@@ -384,6 +481,18 @@ project "CrashpadCompat"
 		includedirs
 		{
 			"external/crashpad/compat/win",
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
 		}
 
     filter "configurations:Debug"
@@ -468,6 +577,18 @@ project "MiniChromium"
 			"external/crashpad/third_party/mini_chromium/mini_chromium/base/synchronization/lock_impl_win.cc",
 			"external/crashpad/third_party/mini_chromium/mini_chromium/base/threading/thread_local_storage_win.cc",
 			"external/crashpad/third_party/mini_chromium/mini_chromium/base/scoped_clear_last_error_win.cc",
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
 		}
 
     filter "configurations:Debug"
@@ -558,6 +679,7 @@ project "CrashpadUtil"
 
 		"external/crashpad/util/net/http_transport_socket.cc",
 		"external/crashpad/util/net/http_transport_win.cc",
+		"external/crashpad/util/net/http_transport_libcurl.cc",
 
 		"external/crashpad/util/process/process_memory_fuchsia.cc",
 		"external/crashpad/util/process/process_memory_fuchsia.h",
@@ -593,6 +715,7 @@ project "CrashpadUtil"
 			"external/crashpad/util/process/process_memory_linux.h",
 			"external/crashpad/util/synchronization/semaphore_posix.cc",
 			"external/crashpad/util/thread/thread_posix.cc",
+			"external/crashpad/util/net/http_transport_libcurl.cc",
 		}
 
 		removefiles
@@ -618,7 +741,6 @@ project "CrashpadUtil"
 			"external/crashpad/util/file/directory_reader_win.cc",
 			"external/crashpad/util/file/file_io_win.cc",
 			"external/crashpad/util/file/filesystem_win.cc",
-			"external/crashpad/util/misc/capture_context_test_util_win.cc",
 			"external/crashpad/util/misc/clock_win.cc",
 			"external/crashpad/util/misc/paths_win.cc",
 			"external/crashpad/util/misc/time_win.cc",
@@ -628,11 +750,32 @@ project "CrashpadUtil"
 			"external/crashpad/util/thread/thread_win.cc",
 			"external/crashpad/util/win/**.h",
 			"external/crashpad/util/win/**.cc",
+			"external/crashpad/util/net/http_transport_win.cc",
+			"external/crashpad/util/misc/capture_context_win.asm",
 		}
 
 		removefiles
 		{
 			"external/crashpad/util/win/*test*.cc",
+			"external/crashpad/util/process/process_memory_sanitized.cc",
+			"external/crashpad/util/process/process_memory_sanitized.h",
+		}
+
+		includedirs
+		{
+			"external/crashpad/compat/win",
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
 		}
 
     filter "configurations:Debug"
@@ -675,7 +818,6 @@ project "CrashpadClient"
 	{
 		"external/crashpad/client/*.h",
 		"external/crashpad/client/*.cc",
-		"external/crashpad/client/crashpad_info_note.S",
 	}
 
 	removefiles
@@ -705,6 +847,8 @@ project "CrashpadClient"
 			"external/crashpad/client/crashpad_client_linux.cc",
 			"external/crashpad/client/pthread_create_linux.cc",
 			"external/crashpad/client/simulate_crash_linux.h",
+
+			"external/crashpad/client/crashpad_info_note.S",
 		}
 
 		includedirs
@@ -721,9 +865,28 @@ project "CrashpadClient"
 			"external/crashpad/client/simulate_crash_win.h",
 		}
 
+		removefiles
+		{
+			"external/crashpad/client/client_argv_handling.h",
+			"external/crashpad/client/client_argv_handling.cc",
+			"external/crashpad/client/crash_report_database_generic.cc",
+		}
+
 		includedirs
 		{
 			"external/crashpad/compat/win",
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
 		}
 
     filter "configurations:Debug"
@@ -771,8 +934,6 @@ project "CrashpadSnapshot"
 	removefiles
 	{
 		"external/crashpad/snapshot/crashpad_types/*test*.cc",
-		"external/crashpad/snapshot/elf/*test*.cc",
-		"external/crashpad/snapshot/elf/*fuzzer*.cc",
 		"external/crashpad/snapshot/minidump/*test*.cc",
 		"external/crashpad/snapshot/sanitized/*test*.cc",
 		"external/crashpad/snapshot/*test*.cc",
@@ -787,6 +948,7 @@ project "CrashpadSnapshot"
 		"external/crashpad/snapshot/mac/**",
 		"external/crashpad/snapshot/posix/**",
 		"external/crashpad/snapshot/win/**",
+		"external/crashpad/snapshot/elf/**",
 	}
 
 	filter "system:linux"
@@ -796,6 +958,9 @@ project "CrashpadSnapshot"
 			"external/crashpad/snapshot/linux/**.cc",
 			"external/crashpad/snapshot/posix/**.h",
 			"external/crashpad/snapshot/posix/**.cc",
+
+			"external/crashpad/snapshot/elf/**.h",
+			"external/crashpad/snapshot/elf/**.cc",
 		}
 
 		includedirs
@@ -808,6 +973,9 @@ project "CrashpadSnapshot"
 		{
 			"external/crashpad/snapshot/linux/*test*.cc",
 			"external/crashpad/snapshot/posix/*test*.cc",
+
+			"external/crashpad/snapshot/elf/*test*.cc",
+			"external/crashpad/snapshot/elf/*fuzzer*.cc",
 		}
 
 	filter "system:windows"
@@ -825,6 +993,18 @@ project "CrashpadSnapshot"
 		removefiles
 		{
 			"external/crashpad/snapshot/win/*test*.cc",
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
 		}
 
     filter "configurations:Debug"
@@ -893,6 +1073,18 @@ project "CrashpadMinidump"
 			"external/crashpad/compat/win",
 		}
 
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
+		}
+
     filter "configurations:Debug"
 	    runtime "Debug"
 		symbols "On"
@@ -901,7 +1093,7 @@ project "CrashpadMinidump"
 		runtime "Release"
         optimize "Full"
 
-project "CrashpadHandler"
+project "CrashpadHandlerLib"
     kind "StaticLib"
     language "C++"
     cppdialect "C++17"
@@ -982,6 +1174,20 @@ project "CrashpadHandler"
 		removefiles
 		{
 			"external/crashpad/handler/win/*test*.cc",
+			"external/crashpad/handler/win/crash_other_program.cc",
+			"external/crashpad/handler/crashpad_handler_main.cc",
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
 		}
 
     filter "configurations:Debug"
@@ -1022,6 +1228,129 @@ project "CrashpadTools"
 		"external/crashpad/tools/tool_support.cc",
 		"external/crashpad/tools/tool_support.h",
 	}
+
+	filter "system:windows"
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
+		}
+
+    filter "configurations:Debug"
+	    runtime "Debug"
+		symbols "On"
+
+	filter "configurations:Release"
+		runtime "Release"
+        optimize "Full"
+
+project "CrashpadGetOpt"
+    kind "StaticLib"
+    language "C++"
+    cppdialect "C++17"
+    staticruntime "off"
+    systemversion "latest"
+    warnings "off"
+	architecture "x86_64"
+	pic "on"
+
+    targetdir ("%{wks.location}/bin/" .. outputdir .. "/%{prj.group}/%{prj.name}")
+    objdir ("%{wks.location}/bin-int/" .. outputdir .. "/%{prj.group}/%{prj.name}")
+
+	defines
+	{
+		"CRASHPAD_FLOCK_ALWAYS_SUPPORTED=1",
+		"CRASHPAD_LSS_SOURCE_EMBEDDED",
+	}
+
+	filter "system:windows"
+		files
+		{
+			"external/crashpad/third_party/getopt/getopt.cc",
+			"external/crashpad/third_party/getopt/getopt.h",
+		}
+
+		includedirs
+		{
+			"external/crashpad/third_party/getopt",
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
+		}
+
+    filter "configurations:Debug"
+	    runtime "Debug"
+		symbols "On"
+
+	filter "configurations:Release"
+		runtime "Release"
+        optimize "Full"
+
+project "crashpad_wer"
+    kind "SharedLib"
+    language "C++"
+    cppdialect "C++17"
+    staticruntime "off"
+    systemversion "latest"
+    warnings "off"
+	architecture "x86_64"
+	pic "on"
+
+    targetdir ("%{wks.location}/bin/" .. outputdir .. "/%{prj.group}/%{prj.name}")
+    objdir ("%{wks.location}/bin-int/" .. outputdir .. "/%{prj.group}/%{prj.name}")
+
+	defines
+	{
+		"CRASHPAD_FLOCK_ALWAYS_SUPPORTED=1",
+		"CRASHPAD_LSS_SOURCE_EMBEDDED",
+		"crashpad_wer_EXPORTS",
+	}
+
+	filter "system:windows"
+		files
+		{
+			"external/crashpad/handler/win/wer/**.cc",
+			"external/crashpad/handler/win/wer/**.h",
+		}
+
+		includedirs
+		{
+			"external/crashpad",
+			"external/crashpad/third_party/mini_chromium/mini_chromium",
+			"external/crashpad/third_party/mini_chromium",
+		}
+
+		removefiles
+		{
+			"external/crashpad/handler/win/wer/crashpad_wer_module_unittest.cc"
+		}
+
+		defines
+		{
+			"WIN32",
+			"_WINDOWS",
+			"NOMINMAX",
+			"UNICODE",
+			"WIN32_LEAN_AND_MEAN",
+			"_CRT_SECURE_NO_WARNINGS",
+			"_HAS_EXCEPTIONS=0",
+			"_UNICODE",
+		}
 
     filter "configurations:Debug"
 	    runtime "Debug"
