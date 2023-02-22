@@ -20,3 +20,9 @@ CodeChecker
 
 # Coverage
 coverage
+
+Makefile
+bin/**
+bin-int/**
+**.make
+Makefile
