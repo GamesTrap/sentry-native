@@ -4,7 +4,6 @@
 #include "sentry_boot.h"
 
 #include "sentry_alloc.h"
-#include "sentry_core.h"
 #include "sentry_string.h"
 #include "sentry_sync.h"
 #include "sentry_utils.h"
@@ -64,7 +63,7 @@ sentry__url_parse(sentry_url_t *url_out, const char *url)
     if (!tmp) {
         goto error;
     }
-    url_out->scheme = sentry__string_clonen(ptr, tmp - ptr);
+    url_out->scheme = sentry__string_clone_n_unchecked(ptr, tmp - ptr);
 
     if (!url_out->scheme || !is_scheme_valid(url_out->scheme)) {
         goto error;
@@ -97,13 +96,14 @@ sentry__url_parse(sentry_url_t *url_out, const char *url)
     tmp = ptr;
     if (has_username) {
         SKIP_WHILE_NOT2(tmp, '@', ':');
-        url_out->username = sentry__string_clonen(ptr, tmp - ptr);
+        url_out->username = sentry__string_clone_n_unchecked(ptr, tmp - ptr);
         ptr = tmp;
         if (*ptr == ':') {
             ptr++;
             tmp = ptr;
             SKIP_WHILE_NOT(tmp, '@');
-            url_out->password = sentry__string_clonen(ptr, tmp - ptr);
+            url_out->password
+                = sentry__string_clone_n_unchecked(ptr, tmp - ptr);
             ptr = tmp;
         }
         if (*ptr != '@') {
@@ -126,7 +126,7 @@ sentry__url_parse(sentry_url_t *url_out, const char *url)
         tmp++;
     }
 
-    url_out->host = sentry__string_clonen(ptr, tmp - ptr);
+    url_out->host = sentry__string_clone_n_unchecked(ptr, tmp - ptr);
 
     /* port */
     ptr = tmp;
@@ -134,7 +134,7 @@ sentry__url_parse(sentry_url_t *url_out, const char *url)
         ptr++;
         tmp = ptr;
         SKIP_WHILE_NOT(tmp, '/');
-        aux_buf = sentry__string_clonen(ptr, tmp - ptr);
+        aux_buf = sentry__string_clone_n_unchecked(ptr, tmp - ptr);
         char *end;
         url_out->port = (int)strtol(aux_buf, &end, 10);
         if (end != aux_buf + strlen(aux_buf)) {
@@ -157,7 +157,7 @@ sentry__url_parse(sentry_url_t *url_out, const char *url)
     /* path */
     tmp = ptr;
     SKIP_WHILE_NOT2(tmp, '#', '?');
-    url_out->path = sentry__string_clonen(ptr, tmp - ptr);
+    url_out->path = sentry__string_clone_n_unchecked(ptr, tmp - ptr);
     ptr = tmp;
 
     /* query */
@@ -165,7 +165,7 @@ sentry__url_parse(sentry_url_t *url_out, const char *url)
         ptr++;
         tmp = ptr;
         SKIP_WHILE_NOT(tmp, '#');
-        url_out->query = sentry__string_clonen(ptr, tmp - ptr);
+        url_out->query = sentry__string_clone_n_unchecked(ptr, tmp - ptr);
         ptr = tmp;
     }
 
@@ -174,7 +174,7 @@ sentry__url_parse(sentry_url_t *url_out, const char *url)
         ptr++;
         tmp = ptr;
         SKIP_WHILE_NOT(tmp, 0);
-        url_out->fragment = sentry__string_clonen(ptr, tmp - ptr);
+        url_out->fragment = sentry__string_clone_n_unchecked(ptr, tmp - ptr);
     }
 
     if (url_out->port == 0) {
@@ -213,7 +213,7 @@ sentry__url_cleanup(sentry_url_t *url)
 }
 
 sentry_dsn_t *
-sentry__dsn_new(const char *raw_dsn)
+sentry__dsn_new_n(const char *raw_dsn, size_t raw_dsn_len)
 {
     sentry_url_t url;
     memset(&url, 0, sizeof(sentry_url_t));
@@ -227,7 +227,7 @@ sentry__dsn_new(const char *raw_dsn)
     memset(dsn, 0, sizeof(sentry_dsn_t));
     dsn->refcount = 1;
 
-    dsn->raw = sentry__string_clone(raw_dsn);
+    dsn->raw = sentry__string_clone_n(raw_dsn, raw_dsn_len);
     if (!dsn->raw || !dsn->raw[0] || sentry__url_parse(&url, dsn->raw) != 0) {
         goto exit;
     }
@@ -275,6 +275,16 @@ exit:
 }
 
 sentry_dsn_t *
+sentry__dsn_new(const char *raw_dsn)
+{
+    if (!raw_dsn) {
+        return NULL;
+    }
+
+    return sentry__dsn_new_n(raw_dsn, strlen(raw_dsn));
+}
+
+sentry_dsn_t *
 sentry__dsn_incref(sentry_dsn_t *dsn)
 {
     if (!dsn) {
@@ -302,7 +312,7 @@ sentry__dsn_decref(sentry_dsn_t *dsn)
 }
 
 char *
-sentry__dsn_get_auth_header(const sentry_dsn_t *dsn)
+sentry__dsn_get_auth_header(const sentry_dsn_t *dsn, const char *user_agent)
 {
     if (!dsn || !dsn->is_valid) {
         return NULL;
@@ -311,8 +321,14 @@ sentry__dsn_get_auth_header(const sentry_dsn_t *dsn)
     sentry__stringbuilder_init(&sb);
     sentry__stringbuilder_append(&sb, "Sentry sentry_key=");
     sentry__stringbuilder_append(&sb, dsn->public_key);
-    sentry__stringbuilder_append(
-        &sb, ", sentry_version=7, sentry_client=" SENTRY_SDK_USER_AGENT);
+    sentry__stringbuilder_append(&sb, ", sentry_version=7");
+
+    sentry__stringbuilder_append(&sb, ", sentry_client=");
+    if (user_agent) {
+        sentry__stringbuilder_append(&sb, user_agent);
+    } else {
+        sentry__stringbuilder_append(&sb, SENTRY_SDK_USER_AGENT);
+    }
     return sentry__stringbuilder_into_string(&sb);
 }
 
@@ -343,25 +359,26 @@ sentry__dsn_get_envelope_url(const sentry_dsn_t *dsn)
 }
 
 char *
-sentry__dsn_get_minidump_url(const sentry_dsn_t *dsn)
+sentry__dsn_get_minidump_url(const sentry_dsn_t *dsn, const char *user_agent)
 {
-    if (!dsn || !dsn->is_valid) {
+    if (!dsn || !dsn->is_valid || !user_agent) {
         return NULL;
     }
     sentry_stringbuilder_t sb;
     init_string_builder_for_url(&sb, dsn);
-    sentry__stringbuilder_append(
-        &sb, "/minidump/?sentry_client=" SENTRY_SDK_USER_AGENT "&sentry_key=");
+    sentry__stringbuilder_append(&sb, "/minidump/?sentry_client=");
+    sentry__stringbuilder_append(&sb, user_agent);
+    sentry__stringbuilder_append(&sb, "&sentry_key=");
     sentry__stringbuilder_append(&sb, dsn->public_key);
     return sentry__stringbuilder_into_string(&sb);
 }
 
 char *
-sentry__msec_time_to_iso8601(uint64_t time)
+sentry__usec_time_to_iso8601(uint64_t time)
 {
     char buf[64];
     size_t buf_len = sizeof(buf);
-    time_t secs = time / 1000;
+    time_t secs = time / 1000000;
     struct tm *tm;
 #ifdef SENTRY_PLATFORM_WINDOWS
     tm = gmtime(&secs);
@@ -380,10 +397,10 @@ sentry__msec_time_to_iso8601(uint64_t time)
         return NULL;
     }
 
-    int msecs = time % 1000;
-    if (msecs) {
+    int usecs = time % 1000000;
+    if (usecs) {
         size_t rv = (size_t)snprintf(
-            buf + written, buf_len - written, ".%03d", msecs);
+            buf + written, buf_len - written, ".%06d", usecs);
         if (rv >= buf_len - written) {
             return NULL;
         }
@@ -399,14 +416,14 @@ sentry__msec_time_to_iso8601(uint64_t time)
 }
 
 uint64_t
-sentry__iso8601_to_msec(const char *iso)
+sentry__iso8601_to_usec(const char *iso)
 {
-    size_t len = strlen(iso);
-    if (len != 20 && len != 24) {
+    size_t len = sentry__guarded_strlen(iso);
+    if (len != 20 && len != 27) {
         return 0;
     }
     // The code is adapted from: https://stackoverflow.com/a/26896792
-    int y, M, d, h, m, s, msec = 0;
+    int y, M, d, h, m, s, usec = 0;
     int consumed = 0;
     if (sscanf(iso, "%d-%d-%dT%d:%d:%d%n", &y, &M, &d, &h, &m, &s, &consumed)
             < 6
@@ -414,9 +431,10 @@ sentry__iso8601_to_msec(const char *iso)
         return 0;
     }
     iso += consumed;
-    // we optionally have millisecond precision
+    // we optionally have microsecond precision
     if (iso[0] == '.') {
-        if (sscanf(iso, ".%d%n", &msec, &consumed) < 1 || consumed != 4) {
+        if (sscanf(iso, ".%d%n", &usec, &consumed) < 1 || consumed != 7) {
+            printf("consumed = %d\n", consumed);
             return 0;
         }
         iso += consumed;
@@ -465,7 +483,7 @@ sentry__iso8601_to_msec(const char *iso)
         return 0;
     }
 
-    return (uint64_t)time * 1000 + msec;
+    return (uint64_t)time * 1000000 + usec;
 }
 
 #ifdef SENTRY_PLATFORM_WINDOWS
@@ -528,4 +546,21 @@ sentry__snprintf_c(char *buf, size_t buf_size, const char *fmt, ...)
 
     va_end(args);
     return rv;
+}
+
+bool
+sentry__check_min_version(sentry_version_t actual, sentry_version_t expected)
+{
+    if (actual.major < expected.major) {
+        return false;
+    }
+    if (actual.major == expected.major && actual.minor < expected.minor) {
+        return false;
+    }
+    if (actual.major == expected.major && actual.minor == expected.minor
+        && actual.patch < expected.patch) {
+        return false;
+    }
+
+    return true;
 }

@@ -40,6 +40,8 @@ set(BREAKPAD_SOURCES_COMMON_WINDOWS
 )
 
 set(BREAKPAD_SOURCES_COMMON_APPLE
+    breakpad/src/common/mac/arch_utilities.cc
+    breakpad/src/common/mac/arch_utilities.h
     breakpad/src/common/mac/file_id.cc
     breakpad/src/common/mac/file_id.h
     breakpad/src/common/mac/macho_id.cc
@@ -126,6 +128,7 @@ add_library(breakpad_client STATIC)
 set_property(TARGET breakpad_client PROPERTY CXX_STANDARD 17)
 set_property(TARGET breakpad_client PROPERTY CXX_STANDARD_REQUIRED On)
 target_sources(breakpad_client PRIVATE ${BREAKPAD_SOURCES_COMMON})
+target_compile_definitions(breakpad_client PRIVATE SENTRY_BACKEND_BREAKPAD)
 
 if(LINUX OR ANDROID)
     target_sources(breakpad_client PRIVATE ${BREAKPAD_SOURCES_COMMON_LINUX} ${BREAKPAD_SOURCES_CLIENT_LINUX})

@@ -35,9 +35,11 @@ typedef struct sentry_options_s {
     char *release;
     char *environment;
     char *dist;
-    char *http_proxy;
+    char *proxy;
     char *ca_certs;
     char *transport_thread_name;
+    char *sdk_name;
+    char *user_agent;
     sentry_path_t *database_path;
     sentry_path_t *handler_path;
     sentry_logger_t logger;
@@ -59,6 +61,7 @@ typedef struct sentry_options_s {
 
     /* Experimentally exposed */
     double traces_sample_rate;
+    sentry_traces_sampler_function traces_sampler;
     size_t max_spans;
 
     /* everything from here on down are options which are stored here but
@@ -69,6 +72,7 @@ typedef struct sentry_options_s {
     long user_consent;
     long refcount;
     uint64_t shutdown_timeout;
+    sentry_handler_strategy_t handler_strategy;
 } sentry_options_t;
 
 /**

@@ -4,8 +4,9 @@
 CMakeSettings.json
 .idea
 
-# CMake builds
+# CMake builds & install
 /*build*
+/*install*
 
 # Run files
 .sentry-native
@@ -21,6 +22,13 @@ CodeChecker
 # Coverage
 coverage
 
+# Gradle / Java
+local.properties
+.gradle
+.cxx
+build
+
+# MSVC
 Makefile
 bin/**
 bin-int/**

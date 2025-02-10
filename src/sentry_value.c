@@ -5,22 +5,27 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #if defined(_MSC_VER)
 #    pragma warning(push)
 #    pragma warning(disable : 4127) // conditional expression is constant
+#elif defined(__clang__)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wstatic-in-inline"
 #endif
 
 #include "../vendor/mpack.h"
 
 #if defined(_MSC_VER)
 #    pragma warning(pop)
+#elif defined(__clang__)
+#    pragma clang diagnostic pop
 #endif
 
 #include "sentry_alloc.h"
 #include "sentry_core.h"
 #include "sentry_json.h"
+#include "sentry_slice.h"
 #include "sentry_string.h"
 #include "sentry_sync.h"
 #include "sentry_utils.h"
@@ -320,13 +325,20 @@ sentry_value_new_bool(int value)
 }
 
 sentry_value_t
-sentry_value_new_string(const char *value)
+sentry_value_new_string_n(const char *value, size_t value_len)
 {
-    char *s = sentry__string_clone(value);
+    char *s = sentry__string_clone_n(value, value_len);
     if (!s) {
         return sentry_value_new_null();
     }
     return sentry__value_new_string_owned(s);
+}
+
+sentry_value_t
+sentry_value_new_string(const char *value)
+{
+    return value ? sentry_value_new_string_n(value, strlen(value))
+                 : sentry_value_new_null();
 }
 
 sentry_value_t
@@ -440,8 +452,13 @@ sentry_value_get_type(sentry_value_t value)
 }
 
 int
-sentry_value_set_by_key(sentry_value_t value, const char *k, sentry_value_t v)
+sentry_value_set_by_key_n(
+    sentry_value_t value, const char *k, size_t k_len, sentry_value_t v)
 {
+    if (!k) {
+        goto fail;
+    }
+    sentry_slice_t k_slice = { k, k_len };
     thing_t *thing = value_as_unfrozen_thing(value);
     if (!thing || thing_get_type(thing) != THING_TYPE_OBJECT) {
         goto fail;
@@ -449,7 +466,7 @@ sentry_value_set_by_key(sentry_value_t value, const char *k, sentry_value_t v)
     obj_t *o = thing->payload._ptr;
     for (size_t i = 0; i < o->len; i++) {
         obj_pair_t *pair = &o->pairs[i];
-        if (sentry__string_eq(pair->k, k)) {
+        if (sentry__slice_eqs(k_slice, pair->k)) {
             sentry_value_decref(pair->v);
             pair->v = v;
             return 0;
@@ -462,7 +479,7 @@ sentry_value_set_by_key(sentry_value_t value, const char *k, sentry_value_t v)
     }
 
     obj_pair_t pair;
-    pair.k = sentry__string_clone(k);
+    pair.k = sentry__slice_to_owned(k_slice);
     if (!pair.k) {
         goto fail;
     }
@@ -476,8 +493,23 @@ fail:
 }
 
 int
-sentry_value_remove_by_key(sentry_value_t value, const char *k)
+sentry_value_set_by_key(sentry_value_t value, const char *k, sentry_value_t v)
 {
+    if (k) {
+        return sentry_value_set_by_key_n(value, k, strlen(k), v);
+    }
+
+    sentry_value_decref(v);
+    return 1;
+}
+
+int
+sentry_value_remove_by_key_n(sentry_value_t value, const char *k, size_t k_len)
+{
+    if (!k) {
+        return 1;
+    }
+    sentry_slice_t k_slice = { k, k_len };
     thing_t *thing = value_as_unfrozen_thing(value);
     if (!thing || thing_get_type(thing) != THING_TYPE_OBJECT) {
         return 1;
@@ -485,7 +517,7 @@ sentry_value_remove_by_key(sentry_value_t value, const char *k)
     obj_t *o = thing->payload._ptr;
     for (size_t i = 0; i < o->len; i++) {
         obj_pair_t *pair = &o->pairs[i];
-        if (sentry__string_eq(pair->k, k)) {
+        if (sentry__slice_eqs(k_slice, pair->k)) {
             sentry_free(pair->k);
             sentry_value_decref(pair->v);
             memmove(o->pairs + i, o->pairs + i + 1,
@@ -494,6 +526,16 @@ sentry_value_remove_by_key(sentry_value_t value, const char *k)
             return 0;
         }
     }
+    return 1;
+}
+
+int
+sentry_value_remove_by_key(sentry_value_t value, const char *k)
+{
+    if (k) {
+        return sentry_value_remove_by_key_n(value, k, strlen(k));
+    }
+
     return 1;
 }
 
@@ -592,8 +634,22 @@ sentry__value_clone(sentry_value_t value)
     }
 }
 
+/**
+ * This appends `v` to the List `value`.
+ * To make this work properly as a ring buffer, the value list needs to have
+ * the ring buffer start index as the first element
+ * (e.g, 1 until max is exceeded, then it will update for each added item)
+ *
+ * It will remove the oldest value in the list, in case the total number of
+ * items would exceed `max`.
+ *
+ * The list is of size `max + 1` to store the start index.
+ *
+ * Returns 0 on success.
+ */
 int
-sentry__value_append_bounded(sentry_value_t value, sentry_value_t v, size_t max)
+sentry__value_append_ringbuffer(
+    sentry_value_t value, sentry_value_t v, size_t max)
 {
     thing_t *thing = value_as_unfrozen_thing(value);
     if (!thing || thing_get_type(thing) != THING_TYPE_LIST) {
@@ -601,31 +657,24 @@ sentry__value_append_bounded(sentry_value_t value, sentry_value_t v, size_t max)
     }
 
     list_t *l = thing->payload._ptr;
-
-    if (l->len < max) {
+    if (l->len == 0) {
+        sentry_value_append(value, sentry_value_new_int32(1));
+    }
+    if (l->len < max + 1) {
         return sentry_value_append(value, v);
     }
+    if (l->len > max + 1) {
+        SENTRY_WARNF("Cannot reduce Ringbuffer list size from %d to %d.",
+            l->len - 1, max);
+        goto fail;
+    }
+    const int32_t start_idx = sentry_value_as_int32(l->items[0]);
 
-    // len: 120
-    // max: 100
-    // move to 0
-    //   move 99 items (len - 1)
-    //   from 20
+    sentry_value_decref(l->items[start_idx]);
+    l->items[start_idx] = v;
+    l->items[0] = sentry_value_new_int32((start_idx % (int32_t)max) + 1);
 
-    size_t to_move = max >= 1 ? max - 1 : 0;
-    size_t to_shift = l->len - to_move;
-    for (size_t i = 0; i < to_shift; i++) {
-        sentry_value_decref(l->items[i]);
-    }
-    if (to_move) {
-        memmove(l->items, l->items + to_shift, to_move * sizeof(l->items[0]));
-    }
-    if (max >= 1) {
-        l->items[max - 1] = v;
-    } else {
-        sentry_value_decref(v);
-    }
-    l->len = max;
+    l->len = max + 1;
     return 0;
 
 fail:
@@ -684,14 +733,17 @@ sentry_value_remove_by_index(sentry_value_t value, size_t index)
 }
 
 sentry_value_t
-sentry_value_get_by_key(sentry_value_t value, const char *k)
+sentry_value_get_by_key_n(sentry_value_t value, const char *k, size_t k_len)
 {
+    if (!k) {
+        return sentry_value_new_null();
+    }
     const thing_t *thing = value_as_thing(value);
     if (thing && thing_get_type(thing) == THING_TYPE_OBJECT) {
         obj_t *o = thing->payload._ptr;
         for (size_t i = 0; i < o->len; i++) {
             obj_pair_t *pair = &o->pairs[i];
-            if (sentry__string_eq(pair->k, k)) {
+            if (sentry__slice_eqs((sentry_slice_t) { k, k_len }, pair->k)) {
                 return pair->v;
             }
         }
@@ -700,9 +752,28 @@ sentry_value_get_by_key(sentry_value_t value, const char *k)
 }
 
 sentry_value_t
+sentry_value_get_by_key(sentry_value_t value, const char *k)
+{
+    return sentry_value_get_by_key_n(value, k, sentry__guarded_strlen(k));
+}
+
+sentry_value_t
+sentry_value_get_by_key_owned_n(
+    sentry_value_t value, const char *k, size_t k_len)
+{
+    sentry_value_t rv = sentry_value_get_by_key_n(value, k, k_len);
+    sentry_value_incref(rv);
+    return rv;
+}
+
+sentry_value_t
 sentry_value_get_by_key_owned(sentry_value_t value, const char *k)
 {
-    sentry_value_t rv = sentry_value_get_by_key(value, k);
+    if (k) {
+        return sentry_value_get_by_key_owned_n(value, k, strlen(k));
+    }
+
+    sentry_value_t rv = sentry_value_new_null();
     sentry_value_incref(rv);
     return rv;
 }
@@ -779,6 +850,28 @@ sentry_value_as_string(sentry_value_t value)
     } else {
         return "";
     }
+}
+
+sentry_value_t
+sentry__value_ring_buffer_to_list(const sentry_value_t rb)
+{
+    const thing_t *thing = value_as_thing(rb);
+    if (!thing || thing_get_type(thing) != THING_TYPE_LIST) {
+        return sentry_value_new_null();
+    }
+    const list_t *rb_list = thing->payload._ptr;
+    if (rb_list->len == 0) {
+        return sentry_value_new_list();
+    }
+    const size_t start_idx = sentry_value_as_int32(rb_list->items[0]);
+
+    sentry_value_t rv = sentry_value_new_list();
+    for (size_t i = 0; i < rb_list->len - 1; i++) {
+        const size_t idx = (start_idx - 1 + i) % (rb_list->len - 1) + 1;
+        sentry_value_incref(rb_list->items[idx]);
+        sentry_value_append(rv, rb_list->items[idx]);
+    }
+    return rv;
 }
 
 int
@@ -885,7 +978,7 @@ sentry__jsonwriter_write_value(sentry_jsonwriter_t *jw, sentry_value_t value)
 char *
 sentry_value_to_json(sentry_value_t value)
 {
-    sentry_jsonwriter_t *jw = sentry__jsonwriter_new(NULL);
+    sentry_jsonwriter_t *jw = sentry__jsonwriter_new_sb(NULL);
     if (!jw) {
         return NULL;
     }
@@ -1061,7 +1154,7 @@ sentry_value_new_event(void)
 
     sentry_value_set_by_key(rv, "timestamp",
         sentry__value_new_string_owned(
-            sentry__msec_time_to_iso8601(sentry__msec_time())));
+            sentry__usec_time_to_iso8601(sentry__usec_time())));
 
     sentry_value_set_by_key(rv, "platform", sentry_value_new_string("native"));
 
@@ -1069,19 +1162,54 @@ sentry_value_new_event(void)
 }
 
 sentry_value_t
-sentry_value_new_message_event(
-    sentry_level_t level, const char *logger, const char *text)
+sentry_value_new_message_event_n(sentry_level_t level, const char *logger,
+    size_t logger_len, const char *text, size_t text_len)
 {
     sentry_value_t rv = sentry_value_new_event();
     sentry_value_set_by_key(rv, "level", sentry__value_new_level(level));
     if (logger) {
-        sentry_value_set_by_key(rv, "logger", sentry_value_new_string(logger));
+        sentry_value_set_by_key(
+            rv, "logger", sentry_value_new_string_n(logger, logger_len));
     }
     if (text) {
         sentry_value_t container = sentry_value_new_object();
         sentry_value_set_by_key(
-            container, "formatted", sentry_value_new_string(text));
+            container, "formatted", sentry_value_new_string_n(text, text_len));
         sentry_value_set_by_key(rv, "message", container);
+    }
+    return rv;
+}
+
+sentry_value_t
+sentry_value_new_message_event(
+    sentry_level_t level, const char *logger, const char *text)
+{
+    return sentry_value_new_message_event_n(level, logger,
+        sentry__guarded_strlen(logger), text, sentry__guarded_strlen(text));
+}
+
+static void
+timestamp_value(sentry_value_t value)
+{
+    sentry_value_set_by_key(value, "timestamp",
+        sentry__value_new_string_owned(
+            sentry__usec_time_to_iso8601(sentry__usec_time())));
+}
+
+sentry_value_t
+sentry_value_new_breadcrumb_n(
+    const char *type, size_t type_len, const char *message, size_t message_len)
+{
+    sentry_value_t rv = sentry_value_new_object();
+    timestamp_value(rv);
+
+    if (type) {
+        sentry_value_set_by_key(
+            rv, "type", sentry_value_new_string_n(type, type_len));
+    }
+    if (message) {
+        sentry_value_set_by_key(
+            rv, "message", sentry_value_new_string_n(message, message_len));
     }
     return rv;
 }
@@ -1089,32 +1217,31 @@ sentry_value_new_message_event(
 sentry_value_t
 sentry_value_new_breadcrumb(const char *type, const char *message)
 {
-    sentry_value_t rv = sentry_value_new_object();
-    sentry_value_set_by_key(rv, "timestamp",
-        sentry__value_new_string_owned(
-            sentry__msec_time_to_iso8601(sentry__msec_time())));
+    return sentry_value_new_breadcrumb_n(type, sentry__guarded_strlen(type),
+        message, sentry__guarded_strlen(message));
+}
 
-    if (type) {
-        sentry_value_set_by_key(rv, "type", sentry_value_new_string(type));
-    }
-    if (message) {
-        sentry_value_set_by_key(
-            rv, "message", sentry_value_new_string(message));
-    }
-    return rv;
+sentry_value_t
+sentry_value_new_exception_n(
+    const char *type, size_t type_len, const char *value, size_t value_len)
+{
+    sentry_value_t exc = sentry_value_new_object();
+    sentry_value_set_by_key(
+        exc, "type", sentry_value_new_string_n(type, type_len));
+    sentry_value_set_by_key(
+        exc, "value", sentry_value_new_string_n(value, value_len));
+    return exc;
 }
 
 sentry_value_t
 sentry_value_new_exception(const char *type, const char *value)
 {
-    sentry_value_t exc = sentry_value_new_object();
-    sentry_value_set_by_key(exc, "type", sentry_value_new_string(type));
-    sentry_value_set_by_key(exc, "value", sentry_value_new_string(value));
-    return exc;
+    return sentry_value_new_exception_n(type, sentry__guarded_strlen(type),
+        value, sentry__guarded_strlen(value));
 }
 
 sentry_value_t
-sentry_value_new_thread(uint64_t id, const char *name)
+sentry_value_new_thread_n(uint64_t id, const char *name, size_t name_len)
 {
     sentry_value_t thread = sentry_value_new_object();
 
@@ -1128,10 +1255,17 @@ sentry_value_new_thread(uint64_t id, const char *name)
     }
 
     if (name) {
-        sentry_value_set_by_key(thread, "name", sentry_value_new_string(name));
+        sentry_value_set_by_key(
+            thread, "name", sentry_value_new_string_n(name, name_len));
     }
 
     return thread;
+}
+
+sentry_value_t
+sentry_value_new_thread(uint64_t id, const char *name)
+{
+    return sentry_value_new_thread_n(id, name, sentry__guarded_strlen(name));
 }
 
 sentry_value_t
@@ -1157,6 +1291,40 @@ sentry_value_new_stacktrace(void **ips, size_t len)
     sentry_value_set_by_key(stacktrace, "frames", frames);
 
     return stacktrace;
+}
+
+sentry_value_t
+sentry_value_new_user_feedback(const sentry_uuid_t *uuid, const char *name,
+    const char *email, const char *comments)
+{
+    return sentry_value_new_user_feedback_n(uuid, name,
+        sentry__guarded_strlen(name), email, sentry__guarded_strlen(email),
+        comments, sentry__guarded_strlen(comments));
+}
+
+sentry_value_t
+sentry_value_new_user_feedback_n(const sentry_uuid_t *uuid, const char *name,
+    size_t name_len, const char *email, size_t email_len, const char *comments,
+    size_t comments_len)
+{
+    sentry_value_t rv = sentry_value_new_object();
+
+    sentry_value_set_by_key(rv, "event_id", sentry__value_new_uuid(uuid));
+
+    if (name) {
+        sentry_value_set_by_key(
+            rv, "name", sentry_value_new_string_n(name, name_len));
+    }
+    if (email) {
+        sentry_value_set_by_key(
+            rv, "email", sentry_value_new_string_n(email, email_len));
+    }
+    if (comments) {
+        sentry_value_set_by_key(
+            rv, "comments", sentry_value_new_string_n(comments, comments_len));
+    }
+
+    return rv;
 }
 
 static sentry_value_t

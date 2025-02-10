@@ -3,6 +3,7 @@
 
 #include "sentry_boot.h"
 #include "sentry_logger.h"
+#include "sentry_sampling_context.h"
 
 #define SENTRY_BREADCRUMBS_MAX 100
 #define SENTRY_SPANS_MAX 1000
@@ -112,12 +113,13 @@ void sentry__options_unlock(void);
 
 #define SENTRY_WITH_OPTIONS(Options)                                           \
     for (const sentry_options_t *Options = sentry__options_getref(); Options;  \
-         sentry_options_free((sentry_options_t *)Options), Options = NULL)
+        sentry_options_free((sentry_options_t *)Options), Options = NULL)
 
 // these for now are only needed outside of core for tests
 #ifdef SENTRY_UNITTEST
 bool sentry__roll_dice(double probability);
-bool sentry__should_send_transaction(sentry_value_t tx_cxt);
+bool sentry__should_send_transaction(
+    sentry_value_t tx_ctx, sentry_sampling_context_t *sampling_ctx);
 #endif
 
 #endif

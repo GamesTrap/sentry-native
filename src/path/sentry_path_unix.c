@@ -169,14 +169,20 @@ sentry__path_dir(const sentry_path_t *path)
 }
 
 sentry_path_t *
-sentry__path_from_str(const char *s)
+sentry__path_from_str_n(const char *s, size_t s_len)
 {
-    char *path = sentry__string_clone(s);
+    char *path = sentry__string_clone_n(s, s_len);
     if (!path) {
         return NULL;
     }
     // NOTE: function will free `path` on error
     return sentry__path_from_str_owned(path);
+}
+
+sentry_path_t *
+sentry__path_from_str(const char *s)
+{
+    return s ? sentry__path_from_str_n(s, strlen(s)) : NULL;
 }
 
 sentry_path_t *
@@ -468,7 +474,7 @@ write_buffer_with_flags(
     int fd = open(
         path->path, flags, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
     if (fd < 0) {
-        SENTRY_TRACEF(
+        SENTRY_WARNF(
             "failed to open file \"%s\" for writing (errno %d, flags %x)",
             path->path, errno, flags);
         return 1;
@@ -494,4 +500,68 @@ sentry__path_append_buffer(
 {
     return write_buffer_with_flags(
         path, buf, buf_len, O_RDWR | O_CREAT | O_APPEND);
+}
+
+struct sentry_filewriter_s {
+    size_t byte_count;
+    int fd;
+};
+
+MUST_USE sentry_filewriter_t *
+sentry__filewriter_new(const sentry_path_t *path)
+{
+    int fd = open(path->path, O_RDWR | O_CREAT | O_TRUNC,
+        S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
+    if (fd < 0) {
+        return NULL;
+    }
+
+    sentry_filewriter_t *result = SENTRY_MAKE(sentry_filewriter_t);
+    if (!result) {
+        close(fd);
+        return NULL;
+    }
+
+    result->fd = fd;
+    result->byte_count = 0;
+    return result;
+}
+
+size_t
+sentry__filewriter_write(
+    sentry_filewriter_t *filewriter, const char *buf, size_t buf_len)
+{
+    if (!filewriter) {
+        return 0;
+    }
+    while (buf_len > 0) {
+        ssize_t n = write(filewriter->fd, buf, buf_len);
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+            continue;
+        } else if (n <= 0) {
+            break;
+        }
+        filewriter->byte_count += n;
+        buf += n;
+        buf_len -= n;
+    }
+
+    return buf_len;
+}
+
+void
+sentry__filewriter_free(sentry_filewriter_t *filewriter)
+{
+    if (!filewriter) {
+        return;
+    }
+
+    close(filewriter->fd);
+    sentry_free(filewriter);
+}
+
+size_t
+sentry__filewriter_byte_count(sentry_filewriter_t *filewriter)
+{
+    return filewriter->byte_count;
 }

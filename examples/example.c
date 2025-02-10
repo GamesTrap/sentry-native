@@ -1,5 +1,7 @@
 #ifdef _WIN32
-#    define WIN32_LEAN_AND_MEAN
+#    ifndef _GAMING_XBOX_SCARLETT
+#        define WIN32_LEAN_AND_MEAN
+#    endif
 #    define NOMINMAX
 #    define _CRT_SECURE_NO_WARNINGS
 #endif
@@ -9,19 +11,50 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #ifdef NDEBUG
 #    undef NDEBUG
 #endif
+
 #include <assert.h>
 
 #ifdef SENTRY_PLATFORM_WINDOWS
+#    include <malloc.h>
 #    include <synchapi.h>
-#    define sleep_s(SECONDS) Sleep((SECONDS)*1000)
+#    define sleep_s(SECONDS) Sleep((SECONDS) * 1000)
 #else
+
 #    include <signal.h>
 #    include <unistd.h>
+
 #    define sleep_s(SECONDS) sleep(SECONDS)
 #endif
+
+static double
+traces_sampler_callback(const sentry_transaction_context_t *transaction_ctx,
+    sentry_value_t custom_sampling_ctx, const int *parent_sampled)
+{
+    if (parent_sampled != NULL) {
+        if (*parent_sampled) {
+            return 0.8; // high sample rate for children of sampled transactions
+        }
+        return 0; // parent is not sampled
+    }
+    if (strcmp(sentry_transaction_context_get_name(transaction_ctx),
+            "little.teapot")
+        == 0) {
+        if (strcmp(sentry_transaction_context_get_operation(transaction_ctx),
+                "Short and stout here is my handle and here is my spout")
+            == 0) {
+            if (sentry_value_as_int32(
+                    sentry_value_get_by_key(custom_sampling_ctx, "b"))
+                == 42) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
 
 static sentry_value_t
 before_send_callback(sentry_value_t event, void *hint, void *closure)
@@ -93,7 +126,9 @@ has_arg(int argc, char **argv, const char *arg)
     return false;
 }
 
-#ifdef CRASHPAD_WER_ENABLED
+#if defined(SENTRY_PLATFORM_WINDOWS) && !defined(__MINGW32__)                  \
+    && !defined(__MINGW64__)
+
 int
 call_rffe_many_times()
 {
@@ -138,7 +173,7 @@ trigger_fastfail_crash()
     __fastfail(77);
 }
 
-#endif // CRASHPAD_WER_ENABLED
+#endif
 
 #ifdef SENTRY_PLATFORM_AIX
 // AIX has a null page mapped to the bottom of memory, which means null derefs
@@ -153,6 +188,13 @@ static void
 trigger_crash()
 {
     memset((char *)invalid_mem, 1, 100);
+}
+
+static void
+trigger_stack_overflow()
+{
+    alloca(1024);
+    trigger_stack_overflow();
 }
 
 int
@@ -218,6 +260,22 @@ main(int argc, char **argv)
             options, discarding_on_crash_callback, NULL);
     }
 
+    if (has_arg(argc, argv, "traces-sampler")) {
+        sentry_options_set_traces_sampler(options, traces_sampler_callback);
+    }
+
+    if (has_arg(argc, argv, "override-sdk-name")) {
+        sentry_options_set_sdk_name(options, "sentry.native.android.flutter");
+    }
+
+    if (has_arg(argc, argv, "http-proxy")) {
+        sentry_options_set_proxy(options, "http://127.0.0.1:8080");
+    }
+
+    if (has_arg(argc, argv, "socks5-proxy")) {
+        sentry_options_set_proxy(options, "socks5://127.0.0.1:1080");
+    }
+
     sentry_init(options);
 
     if (!has_arg(argc, argv, "no-setup")) {
@@ -254,6 +312,21 @@ main(int argc, char **argv)
             debug_crumb, "category", sentry_value_new_string("example!"));
         sentry_value_set_by_key(
             debug_crumb, "level", sentry_value_new_string("debug"));
+
+        // extend the `http` crumb with (optional) data properties as documented
+        // here:
+        // https://develop.sentry.dev/sdk/event-payloads/breadcrumbs/#breadcrumb-types
+        sentry_value_t http_data = sentry_value_new_object();
+        sentry_value_set_by_key(http_data, "url",
+            sentry_value_new_string("https://example.com/api/1.0/users"));
+        sentry_value_set_by_key(
+            http_data, "method", sentry_value_new_string("GET"));
+        sentry_value_set_by_key(
+            http_data, "status_code", sentry_value_new_int32(200));
+        sentry_value_set_by_key(
+            http_data, "reason", sentry_value_new_string("OK"));
+        sentry_value_set_by_key(debug_crumb, "data", http_data);
+
         sentry_add_breadcrumb(debug_crumb);
 
         sentry_value_t nl_crumb
@@ -297,7 +370,11 @@ main(int argc, char **argv)
     if (has_arg(argc, argv, "crash")) {
         trigger_crash();
     }
-#ifdef CRASHPAD_WER_ENABLED
+    if (has_arg(argc, argv, "stack-overflow")) {
+        trigger_stack_overflow();
+    }
+#if defined(SENTRY_PLATFORM_WINDOWS) && !defined(__MINGW32__)                  \
+    && !defined(__MINGW64__)
     if (has_arg(argc, argv, "fastfail")) {
         trigger_fastfail_crash();
     }
@@ -339,6 +416,16 @@ main(int argc, char **argv)
 
         sentry_capture_event(event);
     }
+    if (has_arg(argc, argv, "capture-user-feedback")) {
+        sentry_value_t event = sentry_value_new_message_event(
+            SENTRY_LEVEL_INFO, "my-logger", "Hello user feedback!");
+        sentry_uuid_t event_id = sentry_capture_event(event);
+
+        sentry_value_t user_feedback = sentry_value_new_user_feedback(
+            &event_id, "some-name", "some-email", "some-comment");
+
+        sentry_capture_user_feedback(user_feedback);
+    }
 
     if (has_arg(argc, argv, "capture-transaction")) {
         sentry_transaction_context_t *tx_ctx
@@ -348,8 +435,15 @@ main(int argc, char **argv)
         if (has_arg(argc, argv, "unsample-tx")) {
             sentry_transaction_context_set_sampled(tx_ctx, 0);
         }
+
+        sentry_value_t custom_sampling_ctx = sentry_value_new_object();
+        sentry_value_set_by_key(
+            custom_sampling_ctx, "b", sentry_value_new_int32(42));
         sentry_transaction_t *tx
-            = sentry_transaction_start(tx_ctx, sentry_value_new_null());
+            = sentry_transaction_start(tx_ctx, custom_sampling_ctx);
+
+        sentry_transaction_set_data(
+            tx, "url", sentry_value_new_string("https://example.com"));
 
         if (has_arg(argc, argv, "error-status")) {
             sentry_transaction_set_status(
@@ -362,6 +456,9 @@ main(int argc, char **argv)
             sentry_span_t *grandchild
                 = sentry_span_start_child(child, "littlest.teapot", NULL);
 
+            sentry_span_set_data(
+                child, "span_data_says", sentry_value_new_string("hi!"));
+
             if (has_arg(argc, argv, "error-status")) {
                 sentry_span_set_status(child, SENTRY_SPAN_STATUS_NOT_FOUND);
                 sentry_span_set_status(
@@ -373,6 +470,10 @@ main(int argc, char **argv)
         }
 
         sentry_transaction_finish(tx);
+    }
+
+    if (has_arg(argc, argv, "capture-minidump")) {
+        sentry_capture_minidump("minidump.dmp");
     }
 
     // make sure everything flushes

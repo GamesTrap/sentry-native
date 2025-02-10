@@ -12,12 +12,12 @@ from .assertions import (
     assert_breadcrumb,
     assert_stacktrace,
     assert_event,
-    assert_crash,
+    assert_inproc_crash,
     assert_minidump,
-    assert_timestamp,
     assert_before_send,
     assert_no_before_send,
     assert_crash_timestamp,
+    assert_breakpad_crash,
 )
 from .conditions import has_breakpad, has_files
 
@@ -43,6 +43,26 @@ def test_capture_stdout(cmake):
     assert_attachment(envelope)
     assert_stacktrace(envelope)
 
+    assert_event(envelope)
+
+
+def test_dynamic_sdk_name_override(cmake):
+    tmp_path = cmake(
+        ["sentry_example"],
+        {
+            "SENTRY_BACKEND": "none",
+            "SENTRY_TRANSPORT": "none",
+        },
+    )
+
+    output = check_output(
+        tmp_path,
+        "sentry_example",
+        ["stdout", "override-sdk-name", "capture-event"],
+    )
+    envelope = Envelope.deserialize(output)
+
+    assert_meta(envelope, sdk_override="sentry.native.android.flutter")
     assert_event(envelope)
 
 
@@ -92,9 +112,9 @@ def test_multi_process(cmake):
 
     # while the processes are running, we expect two runs
     runs = [
-        run
-        for run in os.listdir(os.path.join(cwd, ".sentry-native"))
-        if run.endswith(".run")
+        db_run
+        for db_run in os.listdir(os.path.join(cwd, ".sentry-native"))
+        if db_run.endswith(".run")
     ]
     assert len(runs) == 2
 
@@ -108,23 +128,27 @@ def test_multi_process(cmake):
     subprocess.run([cmd], cwd=cwd)
 
     runs = [
-        run
-        for run in os.listdir(os.path.join(cwd, ".sentry-native"))
-        if run.endswith(".run") or run.endswith(".lock")
+        db_run
+        for db_run in os.listdir(os.path.join(cwd, ".sentry-native"))
+        if db_run.endswith(".run") or db_run.endswith(".lock")
     ]
     assert len(runs) == 0
 
 
-def run_crash_stdout_for(backend, cmake, example_args):
+def run_stdout_for(backend, cmake, example_args):
     tmp_path = cmake(
         ["sentry_example"],
         {"SENTRY_BACKEND": backend, "SENTRY_TRANSPORT": "none"},
     )
 
-    child = run(tmp_path, "sentry_example", ["attachment", "crash"] + example_args)
+    child = run(tmp_path, "sentry_example", example_args)
     assert child.returncode  # well, it's a crash after all
 
     return tmp_path, check_output(tmp_path, "sentry_example", ["stdout", "no-setup"])
+
+
+def run_crash_stdout_for(backend, cmake, example_args):
+    return run_stdout_for(backend, cmake, ["attachment", "crash"] + example_args)
 
 
 def test_inproc_crash_stdout(cmake):
@@ -136,7 +160,7 @@ def test_inproc_crash_stdout(cmake):
     assert_meta(envelope, integration="inproc")
     assert_breadcrumb(envelope)
     assert_attachment(envelope)
-    assert_crash(envelope)
+    assert_inproc_crash(envelope)
 
 
 def test_inproc_crash_stdout_before_send(cmake):
@@ -148,7 +172,7 @@ def test_inproc_crash_stdout_before_send(cmake):
     assert_meta(envelope, integration="inproc")
     assert_breadcrumb(envelope)
     assert_attachment(envelope)
-    assert_crash(envelope)
+    assert_inproc_crash(envelope)
     assert_before_send(envelope)
 
 
@@ -175,7 +199,19 @@ def test_inproc_crash_stdout_before_send_and_on_crash(cmake):
     assert_meta(envelope, integration="inproc")
     assert_breadcrumb(envelope)
     assert_attachment(envelope)
-    assert_crash(envelope)
+    assert_inproc_crash(envelope)
+
+
+def test_inproc_stack_overflow_stdout(cmake):
+    tmp_path, output = run_stdout_for("inproc", cmake, ["attachment", "stack-overflow"])
+
+    envelope = Envelope.deserialize(output)
+
+    assert_crash_timestamp(has_files, tmp_path)
+    assert_meta(envelope, integration="inproc")
+    assert_breadcrumb(envelope)
+    assert_attachment(envelope)
+    assert_inproc_crash(envelope)
 
 
 @pytest.mark.skipif(not has_breakpad, reason="test needs breakpad backend")
@@ -189,6 +225,7 @@ def test_breakpad_crash_stdout(cmake):
     assert_breadcrumb(envelope)
     assert_attachment(envelope)
     assert_minidump(envelope)
+    assert_breakpad_crash(envelope)
 
 
 @pytest.mark.skipif(not has_breakpad, reason="test needs breakpad backend")
@@ -203,6 +240,7 @@ def test_breakpad_crash_stdout_before_send(cmake):
     assert_attachment(envelope)
     assert_minidump(envelope)
     assert_before_send(envelope)
+    assert_breakpad_crash(envelope)
 
 
 @pytest.mark.skipif(not has_breakpad, reason="test needs breakpad backend")
@@ -230,3 +268,20 @@ def test_breakpad_crash_stdout_before_send_and_on_crash(cmake):
     assert_meta(envelope, integration="breakpad")
     assert_breadcrumb(envelope)
     assert_attachment(envelope)
+    assert_breakpad_crash(envelope)
+
+
+@pytest.mark.skipif(not has_breakpad, reason="test needs breakpad backend")
+def test_breakpad_stack_overflow_stdout(cmake):
+    tmp_path, output = run_stdout_for(
+        "breakpad", cmake, ["attachment", "stack-overflow"]
+    )
+
+    envelope = Envelope.deserialize(output)
+
+    assert_crash_timestamp(has_files, tmp_path)
+    assert_meta(envelope, integration="breakpad")
+    assert_breadcrumb(envelope)
+    assert_attachment(envelope)
+    assert_minidump(envelope)
+    assert_breakpad_crash(envelope)
